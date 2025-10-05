@@ -59,6 +59,13 @@ class BaliBlindBatterySensor(CoordinatorEntity[BaliBlindCoordinator], SensorEnti
         self._attr_translation_key = "battery"
 
     @property
+    def name(self) -> str | None:
+        """Return the name of the sensor."""
+        device_data = self.coordinator.data.get(self._device_id, {})
+        device_name = device_data.get("name")
+        return f"{device_name} Battery" if device_name else "Battery"
+
+    @property
     def native_value(self) -> int | None:
         """Return the battery level."""
         device_data = self.coordinator.data.get(self._device_id, {})
