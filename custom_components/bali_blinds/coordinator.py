@@ -65,14 +65,25 @@ class BaliBlindCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         if item_name == "dimmer":
             self.data[device_id]["position"] = value
-            # Clear pending position since we got an actual update
+
+            # Only clear pending position if the update matches the target
             if device_id in self._pending_positions:
-                _LOGGER.debug(
-                    "Clearing pending position for %s (got actual update: %s)",
-                    device_id,
-                    value,
-                )
-                self._clear_pending_position(device_id)
+                pending_position = self._pending_positions[device_id]
+                # Allow small tolerance (within 2%) for position matching
+                if abs(value - pending_position) <= 2:
+                    _LOGGER.debug(
+                        "Clearing pending position for %s (reached target: %s)",
+                        device_id,
+                        value,
+                    )
+                    self._clear_pending_position(device_id)
+                else:
+                    _LOGGER.debug(
+                        "Device %s at intermediate position %s (target: %s)",
+                        device_id,
+                        value,
+                        pending_position,
+                    )
         elif item_name == "battery":
             self.data[device_id]["battery"] = value
         elif item_name == "switch":
