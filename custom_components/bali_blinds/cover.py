@@ -71,8 +71,7 @@ class BaliBlindCover(CoordinatorEntity[BaliBlindCoordinator], CoverEntity):
     @property
     def name(self) -> str | None:
         """Return the name of the cover."""
-        device_data = self.coordinator.data.get(self._device_id, {})
-        return device_data.get("name")
+        return None
 
     @property
     def current_cover_position(self) -> int | None:
