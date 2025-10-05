@@ -10,6 +10,7 @@ from homeassistant.components.cover import (
     CoverEntityFeature,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -54,6 +55,17 @@ class BaliBlindCover(CoordinatorEntity[BaliBlindCoordinator], CoverEntity):
             f"{coordinator.config_entry.entry_id}_{device_id}"
             if coordinator.config_entry
             else device_id
+        )
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this shade."""
+        device_data = self.coordinator.data.get(self._device_id, {})
+        return DeviceInfo(
+            identifiers={(self.coordinator.config_entry.domain, self._device_id)},
+            name=device_data.get("name", "Bali Blind"),
+            manufacturer=device_data.get("manufacturer", "Bali"),
+            model=device_data.get("model"),
         )
 
     @property

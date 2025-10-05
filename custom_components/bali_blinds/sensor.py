@@ -9,6 +9,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -57,6 +58,17 @@ class BaliBlindBatterySensor(CoordinatorEntity[BaliBlindCoordinator], SensorEnti
             else f"{device_id}_battery"
         )
         self._attr_translation_key = "battery"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this shade."""
+        device_data = self.coordinator.data.get(self._device_id, {})
+        return DeviceInfo(
+            identifiers={(self.coordinator.config_entry.domain, self._device_id)},
+            name=device_data.get("name", "Bali Blind"),
+            manufacturer=device_data.get("manufacturer", "Bali"),
+            model=device_data.get("model"),
+        )
 
     @property
     def name(self) -> str | None:
