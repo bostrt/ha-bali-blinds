@@ -1,6 +1,7 @@
 {
   "domain": "bali_blinds",
   "name": "Bali Blinds",
+  "version": "0.1.0",
   "codeowners": ["@bostrt"],
   "config_flow": true,
   "dependencies": [],
