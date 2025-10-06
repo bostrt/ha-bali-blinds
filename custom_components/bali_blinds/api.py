@@ -83,41 +83,78 @@ class BaliWebSocket:
         self._receive_task: asyncio.Task | None = None
         self._connected = False
 
-    async def connect(self) -> None:
-        """Connect to WebSocket and login."""
-        _LOGGER.debug("Connecting to WebSocket: %s", self._server_relay)
+    async def connect(self, max_retries: int = 3, retry_delay: float = 2.0) -> None:
+        """Connect to WebSocket and login with retry logic.
 
-        try:
-            self._ws = await self._session.ws_connect(self._server_relay)
-            _LOGGER.debug("WebSocket connected, starting receive task")
+        Args:
+            max_retries: Maximum number of connection attempts (default: 3)
+            retry_delay: Base delay in seconds between retries (default: 2.0)
+        """
+        last_error = None
 
-            # Start receive task
-            self._receive_task = asyncio.create_task(self._receive_messages())
+        for attempt in range(max_retries):
+            try:
+                _LOGGER.debug(
+                    "Connecting to WebSocket (attempt %d/%d): %s",
+                    attempt + 1,
+                    max_retries,
+                    self._server_relay,
+                )
 
-            # Login to the hub
-            login_result = await self._send_message(
-                "loginUserMios",
-                {
-                    "PK_Device": self._device_id,
-                    "MMSAuthSig": self._identity_signature,
-                    "MMSAuth": self._identity_token,
-                },
-            )
-            _LOGGER.debug("Login result: %s", login_result)
+                self._ws = await self._session.ws_connect(self._server_relay)
+                _LOGGER.debug("WebSocket connected, starting receive task")
 
-            # Register with the hub
-            register_result = await self._send_message(
-                "register",
-                {"serial": self._device_id},
-            )
-            _LOGGER.debug("Register result: %s", register_result)
+                # Start receive task
+                self._receive_task = asyncio.create_task(self._receive_messages())
 
-            self._connected = True
-            _LOGGER.info("Successfully connected to Bali WebSocket")
+                # Login to the hub
+                login_result = await self._send_message(
+                    "loginUserMios",
+                    {
+                        "PK_Device": self._device_id,
+                        "MMSAuthSig": self._identity_signature,
+                        "MMSAuth": self._identity_token,
+                    },
+                )
+                _LOGGER.debug("Login result: %s", login_result)
 
-        except Exception as err:
-            _LOGGER.exception("Failed to connect to WebSocket: %s", err)
-            raise BaliConnectionError(f"WebSocket connection failed: {err}") from err
+                # Register with the hub
+                register_result = await self._send_message(
+                    "register",
+                    {"serial": self._device_id},
+                )
+                _LOGGER.debug("Register result: %s", register_result)
+
+                self._connected = True
+                _LOGGER.info("Successfully connected to Bali WebSocket")
+                return
+
+            except Exception as err:
+                last_error = err
+                _LOGGER.warning(
+                    "Failed to connect to WebSocket (attempt %d/%d): %s",
+                    attempt + 1,
+                    max_retries,
+                    err,
+                )
+
+                # Clean up on failure
+                if self._ws and not self._ws.closed:
+                    await self._ws.close()
+                self._ws = None
+                self._connected = False
+
+                # Wait before retrying (exponential backoff)
+                if attempt < max_retries - 1:
+                    delay = retry_delay * (2 ** attempt)
+                    _LOGGER.debug("Waiting %.1f seconds before retry...", delay)
+                    await asyncio.sleep(delay)
+
+        # All retries exhausted
+        _LOGGER.error("Failed to connect after %d attempts", max_retries)
+        raise BaliConnectionError(
+            f"WebSocket connection failed after {max_retries} attempts: {last_error}"
+        ) from last_error
 
     async def disconnect(self) -> None:
         """Disconnect from WebSocket."""
@@ -261,6 +298,7 @@ class BaliAPI:
         self._gateway_id = gateway_id
         self._auth_data: BaliAuthData | None = None
         self._websocket: BaliWebSocket | None = None
+        self._update_callbacks: list[Callable[[dict[str, Any]], None]] = []
 
     async def authenticate(self) -> bool:
         """Authenticate with Bali cloud API."""
@@ -485,8 +523,13 @@ class BaliAPI:
             _LOGGER.exception("Unexpected error during authentication: %s", err)
             raise BaliAuthError(f"Unexpected authentication error: {err}") from err
 
-    async def connect_websocket(self) -> None:
-        """Connect to WebSocket for real-time communication."""
+    async def connect_websocket(self, max_retries: int = 3, retry_delay: float = 2.0) -> None:
+        """Connect to WebSocket for real-time communication.
+
+        Args:
+            max_retries: Maximum number of connection attempts (default: 3)
+            retry_delay: Base delay in seconds between retries (default: 2.0)
+        """
         if not self._auth_data:
             raise BaliAuthError("Not authenticated")
 
@@ -506,7 +549,37 @@ class BaliAPI:
             session=self._session,
         )
 
-        await self._websocket.connect()
+        await self._websocket.connect(max_retries=max_retries, retry_delay=retry_delay)
+
+    async def ensure_websocket_connected(self, max_retries: int = 3, retry_delay: float = 2.0) -> None:
+        """Ensure WebSocket is connected, reconnect if necessary.
+
+        Args:
+            max_retries: Maximum number of connection attempts (default: 3)
+            retry_delay: Base delay in seconds between retries (default: 2.0)
+        """
+        if self._websocket and self._websocket.connected:
+            return
+
+        _LOGGER.info("WebSocket not connected, attempting to reconnect...")
+
+        # Disconnect old websocket if exists
+        if self._websocket:
+            try:
+                await self._websocket.disconnect()
+            except Exception as err:
+                _LOGGER.debug("Error disconnecting old websocket: %s", err)
+            self._websocket = None
+
+        # Reconnect
+        await self.connect_websocket(max_retries=max_retries, retry_delay=retry_delay)
+
+        # Re-register all update listeners after reconnection
+        for callback in self._update_callbacks:
+            if self._websocket:
+                self._websocket.add_listener("hub.item.updated", callback)
+                self._websocket.add_listener("hub.device.updated", callback)
+        _LOGGER.debug("Re-registered %d update listeners", len(self._update_callbacks))
 
     async def disconnect_websocket(self) -> None:
         """Disconnect from WebSocket."""
@@ -516,14 +589,19 @@ class BaliAPI:
 
     def add_update_listener(self, callback: Callable[[dict[str, Any]], None]) -> None:
         """Add listener for hub.item.updated and hub.device.updated events."""
+        # Store callback for re-registration after reconnection
+        if callback not in self._update_callbacks:
+            self._update_callbacks.append(callback)
+
+        # Register with current websocket if connected
         if self._websocket:
             self._websocket.add_listener("hub.item.updated", callback)
             self._websocket.add_listener("hub.device.updated", callback)
 
     async def get_devices(self) -> list[BaliDevice]:
         """Get list of devices via WebSocket."""
-        if not self._websocket or not self._websocket.connected:
-            raise BaliConnectionError("WebSocket not connected")
+        # Ensure websocket is connected, reconnect if needed
+        await self.ensure_websocket_connected()
 
         try:
             # Get device list with metadata
@@ -668,8 +746,8 @@ class BaliAPI:
 
     async def get_device_items(self, device_id: str) -> dict[str, Any]:
         """Get all items for a specific device."""
-        if not self._websocket or not self._websocket.connected:
-            raise BaliConnectionError("WebSocket not connected")
+        # Ensure websocket is connected, reconnect if needed
+        await self.ensure_websocket_connected()
 
         try:
             items = await self._websocket.get_items()
@@ -695,8 +773,8 @@ class BaliAPI:
 
     async def set_device_position(self, device_id: str, position: int) -> None:
         """Set position of a blind device via WebSocket."""
-        if not self._websocket or not self._websocket.connected:
-            raise BaliConnectionError("WebSocket not connected")
+        # Ensure websocket is connected, reconnect if needed
+        await self.ensure_websocket_connected()
 
         if not 0 <= position <= 100:
             raise ValueError("Position must be between 0 and 100")
